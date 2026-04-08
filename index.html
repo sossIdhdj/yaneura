@@ -1542,7 +1542,7 @@ canvas.addEventListener('touchend',function(e){
     // スワイプなし（≒タップ）は無効（スライドのみ）
     return;
   }
-  if(Date.now()-touchT<300&&!touchMoved) handleTap();
+if(Date.now()-touchT<500) handleTap();
 },{passive:false});
 
 // --- マウス（PC） ---
