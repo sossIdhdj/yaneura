@@ -7,12 +7,7 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#0C0A18; display:flex; justify-content: flex-start; align-items: center; flex-direction:column; padding-top: 20px; }
-canvas { 
-    display: block; 
-    image-rendering: pixelated; 
-    max-width: 100%; 
-    height: auto; 
-}
+canvas { display:block; image-rendering:pixelated; max-width: 100%; height: auto; }
 </style>
 </head>
 <body>
@@ -1472,77 +1467,42 @@ function handleTap(){
 }
 
 // --- タッチ ---
-canvas.addEventListener('touchstart', function(e) {
-    e.preventDefault();
-    var t = e.touches[0];
-    
-    // 座標補正をここで行う
-    var rect = canvas.getBoundingClientRect();
-    var scaleX = canvas.width / rect.width;
-    var scaleY = canvas.height / rect.height;
-    var canvasX = (t.clientX - rect.left) * scaleX;
-    var canvasY = (t.clientY - rect.top) * scaleY;
-
-  // 1487行目あたりから
-    touchSX = canvasX;
-    touchSY = canvasY;
-    touchT = Date.now();
-    touchMov = false;
-
-    if(mode === 'peep') {
-        peepSwipeSX = canvasX;  // ここが canvasX になっているか！
-        peepSwipeSY = canvasY;  // ここが canvasY になっているか！
-    }
-}, {passive: false});
-}, {passive: false});
-canvas.addEventListener('touchmove',function(e){
-    e.preventDefault();
-    var t=e.touches[0];
-
-    // 【追加】ここにもズレ計算を入れる
-    var rect = canvas.getBoundingClientRect();
-    var scaleX = canvas.width / rect.width;
-    var scaleY = canvas.height / rect.height;
-    var canvasX = (t.clientX - rect.left) * scaleX;
-    var canvasY = (t.clientY - rect.top) * scaleY;
-
-    if(mode==='attic'){
-        touchMoved=true;
-        // 【変更】canvasX と canvasY を使う
-        var dx=canvasX-touchSX, dy=canvasY-touchSY;
-        var dist=Math.sqrt(dx*dx+dy*dy);
-        if(dist>8){player.vx=(dx/dist)*3.4;player.vy=(dy/dist)*3.4;}
-    } else if(mode==='peep'){
-        // 【変更】canvasX と canvasY を使う
-        var ddx=canvasX-peepSwipeSX, ddy=canvasY-peepSwipeSY;
-        if(Math.sqrt(ddx*ddx+ddy*ddy)>6) peepSwipeMoved=true;
-    }
+canvas.addEventListener('touchstart',function(e){
+  e.preventDefault();
+  var t=e.touches[0];
+  touchSX=t.clientX;touchSY=t.clientY;touchT=Date.now();touchMoved=false;
+  if(mode==='peep'){peepSwipeSX=t.clientX;peepSwipeSY=t.clientY;peepSwipeMoved=false;}
 },{passive:false});
+
+canvas.addEventListener('touchmove',function(e){
+  e.preventDefault();
+  var t=e.touches[0];
+  if(mode==='attic'){
+    touchMoved=true;
+    var dx=t.clientX-touchSX,dy=t.clientY-touchSY;
+    var dist=Math.sqrt(dx*dx+dy*dy);
+    if(dist>8){player.vx=(dx/dist)*3.4;player.vy=(dy/dist)*3.4;}
+  } else if(mode==='peep'){
+    var ddx=t.clientX-peepSwipeSX,ddy=t.clientY-peepSwipeSY;
+    if(Math.sqrt(ddx*ddx+ddy*ddy)>6) peepSwipeMoved=true;
+  }
+},{passive:false});
+
 canvas.addEventListener('touchend',function(e){
   e.preventDefault();
- var t2 = e.changedTouches[0];
-
-    // 画面のズレを補正する計算を追加
-    var rect = canvas.getBoundingClientRect();
-    var scaleX = canvas.width / rect.width;
-    var scaleY = canvas.height / rect.height;
-    var canvasX2 = (t2.clientX - rect.left) * scaleX;
-    var canvasY2 = (t2.clientY - rect.top) * scaleY;
-
-    if(mode === 'peep'){
-        // 計算後の canvasX2, canvasY2 を使う
-        var ddx = canvasX2 - peepSwipeSX;
-        var ddy = canvasY2 - peepSwipeSY;
-        var dist = Math.sqrt(ddx*ddx + ddy*ddy);
-        if(peepSwipeMoved && dist >= SWIPE_MIN){
-            // スワイプ方向に投げる
-            var ang = Math.atan2(ddy, ddx);
-            throwShurikenAngle(ang);
-        }
+  var t2=e.changedTouches[0];
+  if(mode==='peep'){
+    var ddx=t2.clientX-peepSwipeSX,ddy=t2.clientY-peepSwipeSY;
+    var dist=Math.sqrt(ddx*ddx+ddy*ddy);
+    if(peepSwipeMoved&&dist>=SWIPE_MIN){
+      // スワイプ方向に投げる（穴の中心から）
+      var ang=Math.atan2(ddy,ddx);
+      throwShurikenAngle(ang);
+    }
     // スワイプなし（≒タップ）は無効（スライドのみ）
     return;
   }
-if(Date.now()-touchT<500) handleTap();
+  if(Date.now()-touchT<300&&!touchMoved) handleTap();
 },{passive:false});
 
 // --- マウス（PC） ---
