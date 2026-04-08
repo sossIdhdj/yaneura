@@ -1496,19 +1496,28 @@ canvas.addEventListener('touchstart', function(e) {
     }
 }, {passive: false});
 canvas.addEventListener('touchmove',function(e){
-  e.preventDefault();
-  var t=e.touches[0];
-  if(mode==='attic'){
-    touchMoved=true;
-    var dx=t.clientX-touchSX,dy=t.clientY-touchSY;
-    var dist=Math.sqrt(dx*dx+dy*dy);
-    if(dist>8){player.vx=(dx/dist)*3.4;player.vy=(dy/dist)*3.4;}
-  } else if(mode==='peep'){
-    var ddx=t.clientX-peepSwipeSX,ddy=t.clientY-peepSwipeSY;
-    if(Math.sqrt(ddx*ddx+ddy*ddy)>6) peepSwipeMoved=true;
-  }
-},{passive:false});
+    e.preventDefault();
+    var t=e.touches[0];
 
+    // 【追加】ここにもズレ計算を入れる
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / rect.width;
+    var scaleY = canvas.height / rect.height;
+    var canvasX = (t.clientX - rect.left) * scaleX;
+    var canvasY = (t.clientY - rect.top) * scaleY;
+
+    if(mode==='attic'){
+        touchMoved=true;
+        // 【変更】canvasX と canvasY を使う
+        var dx=canvasX-touchSX, dy=canvasY-touchSY;
+        var dist=Math.sqrt(dx*dx+dy*dy);
+        if(dist>8){player.vx=(dx/dist)*3.4;player.vy=(dy/dist)*3.4;}
+    } else if(mode==='peep'){
+        // 【変更】canvasX と canvasY を使う
+        var ddx=canvasX-peepSwipeSX, ddy=canvasY-peepSwipeSY;
+        if(Math.sqrt(ddx*ddx+ddy*ddy)>6) peepSwipeMoved=true;
+    }
+},{passive:false});
 canvas.addEventListener('touchend',function(e){
   e.preventDefault();
   var t2=e.changedTouches[0];
