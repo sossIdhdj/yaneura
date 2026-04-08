@@ -1476,24 +1476,24 @@ canvas.addEventListener('touchstart', function(e) {
     e.preventDefault();
     var t = e.touches[0];
     
-    // --- ここから追加 ---
+    // 座標補正をここで行う
     var rect = canvas.getBoundingClientRect();
     var scaleX = canvas.width / rect.width;
     var scaleY = canvas.height / rect.height;
     var canvasX = (t.clientX - rect.left) * scaleX;
     var canvasY = (t.clientY - rect.top) * scaleY;
-    // --------------------
 
-    // 今までの変数に、計算後の座標（canvasX, canvasY）を代入
     touchSX = canvasX; 
     touchSY = canvasY;
     touchT = Date.now();
     touchMov = false;
 
     if(mode === 'peep') {
-        peepSwipeSX = canvasX;
+        // 【重要】ここを t.clientX ではなく canvasX にする！
+        peepSwipeSX = canvasX; 
         peepSwipeSY = canvasY;
     }
+}, {passive: false});
 }, {passive: false});
 canvas.addEventListener('touchmove',function(e){
     e.preventDefault();
