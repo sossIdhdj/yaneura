@@ -1,0 +1,1537 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>屋根裏の散歩者</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0C0A18; display:flex; align-items:center; justify-content:center; height:100vh; overflow:hidden; touch-action:none; font-family:monospace; }
+canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+var W = Math.min(390, window.innerWidth);
+var H = Math.min(680, window.innerHeight);
+var DPR = 2; // 2倍の物理解像度でレンダリング→細かいドット
+canvas.width  = W * DPR;
+canvas.height = H * DPR;
+canvas.style.width  = W + 'px';
+canvas.style.height = H + 'px';
+ctx.scale(DPR, DPR); // 以降の描画はすべて論理座標（W×H）で行う
+
+// ===========================
+// ポップかわいいカラーパレット
+// ===========================
+var P = {
+  // 屋根裏（あたたかい松材）
+  WL:'#EECF6A', WM:'#D4A83C', WD:'#A87420', WG:'#7A5218',
+  BM:'#C08830', BL:'#E0B050',
+  AT:'#D8C490',
+  // 畳・板の間（鮮やか緑）
+  TA:'#78B058', TA2:'#90C870', TB:'#507838',
+  TF:'#A07848', TF2:'#B88C58',
+  // 人物
+  SK:'#FFDA9C', SKD:'#F0B868',
+  HA:'#2C1808', HA2:'#3C2810',
+  // 忍者（明るいロイヤルブルー・かわいめ）
+  NB:'#2858A8', NB2:'#3878CC', NBL:'#60A0E8', NND:'#98D0F8',
+  // UI
+  RD:'#E83030', GN:'#30C030', YL:'#F8D820',
+  WH:'#FFFFFF', DK:'#080418',
+  // アクセント（ポップ）
+  AC1:'#E050F0', AC2:'#F06050', AC3:'#50D8F8',
+  BG:'#1C1A30',
+  AN:'#F8D050'
+};
+var SHIRTS = ['#E04040','#2060D8','#30A040','#E08010','#8030C8','#D06030','#10A8A0'];
+var HAIRS  = [P.HA, P.HA2, '#301008'];
+var SKINS  = [P.SK, P.SKD, '#FFCA88', '#F0A860'];
+
+// ===========================
+// 音声（lookahead方式・重くならない）
+// ===========================
+var AC = null, MG = null;
+var bgmNextBeat = 0, bgmBeatIdx = 0;
+var BGM_BPM = 152;
+var BEAT = 60 / BGM_BPM;
+var SIXTEENTH = BEAT / 4;
+var BGM_ACTIVE = false;
+
+// メロディ（Aマイナーペンタ・跳ねる和風ポップ）
+var MEL = [
+  [880,2],[0,2],[660,2],[0,2],[784,2],[660,2],[0,4],
+  [784,2],[660,2],[587,2],[0,2],[660,4],[0,4],
+  [880,2],[0,2],[784,2],[660,2],[784,2],[0,2],[880,2],[0,2],
+  [660,2],[587,2],[440,2],[0,2],[587,4],[0,4],
+  [1047,2],[880,2],[784,2],[660,2],[784,2],[0,2],[660,2],[0,2],
+  [587,2],[0,2],[440,2],[0,2],[587,2],[660,2],[0,4],
+  [784,2],[0,2],[880,2],[784,2],[660,2],[0,2],[587,2],[0,2],
+  [440,4],[587,2],[660,2],[784,4],[0,4]
+];
+// ベース（三角波・跳ねる）
+var BAS = [
+  [220,4],[0,4],[330,4],[0,4],
+  [294,4],[0,4],[220,4],[0,4],
+  [220,4],[0,4],[261,4],[0,4],
+  [196,4],[0,4],[220,4],[0,4],
+  [220,4],[0,4],[330,4],[0,4],
+  [261,4],[0,4],[294,4],[0,4],
+  [220,4],[0,4],[261,4],[0,4],
+  [196,8],[220,8]
+];
+var melIdx=0, basIdx=0;
+var melTime=0, basTime=0;
+var SCHED_AHEAD = 0.25; // 250ms先まで予約
+
+function initAudio() {
+  if (AC) { try { AC.resume(); } catch(e){} return; }
+  try {
+    AC = new (window.AudioContext||window.webkitAudioContext)();
+    MG = AC.createGain(); MG.gain.value = 0.75; MG.connect(AC.destination);
+    BGM_ACTIVE = true;
+    var now = AC.currentTime + 0.05;
+    melTime = now; basTime = now;
+    bgmNextBeat = now;
+  } catch(e){}
+}
+
+// 覗きモード用：時計の針音
+var tickTime = 0;
+var TICK_INTERVAL = 0.5; // 0.5秒ごと（1秒=2拍感）
+var TICK_FAST_INTERVAL = 0.25; // タイマー残り少ないと速くなる
+
+// ゲームループ内でこれを呼ぶ（setIntervalなし→重くならない）
+function tickBGM() {
+  if (!AC) return;
+  var now = AC.currentTime;
+
+  // 覗きモードは時計の針のみ
+  if (mode === 'peep' || mode === 'noticed') {
+    var interval = (peepTimer < peepTimerMax * 0.25) ? TICK_FAST_INTERVAL : TICK_INTERVAL;
+    while (tickTime < now + 0.3) {
+      schedTick(tickTime);
+      tickTime += interval;
+    }
+    return;
+  }
+
+  if (!BGM_ACTIVE) return;
+  // メロディ
+  while (melTime < now + SCHED_AHEAD && MEL.length > 0) {
+    var note = MEL[melIdx % MEL.length];
+    var freq = note[0], dur = note[1] * SIXTEENTH;
+    if (freq > 0) schedNote(freq, melTime, dur * 0.82, 'square', 0.065);
+    melTime += dur;
+    melIdx++;
+  }
+  // ベース
+  while (basTime < now + SCHED_AHEAD && BAS.length > 0) {
+    var bn = BAS[basIdx % BAS.length];
+    var bf = bn[0], bd = bn[1] * SIXTEENTH;
+    if (bf > 0) schedNote(bf, basTime, bd * 0.75, 'triangle', 0.10);
+    basTime += bd;
+    basIdx++;
+  }
+  // キック・スネア（beat単位）
+  while (bgmNextBeat < now + SCHED_AHEAD) {
+    var bt = bgmNextBeat;
+    schedKick(bt);
+    schedHihat(bt, 0.04);
+    schedHihat(bt + SIXTEENTH*2, 0.02);
+    schedSnare(bt + BEAT*0.5);
+    schedHihat(bt + BEAT*0.5, 0.035);
+    bgmNextBeat += BEAT;
+  }
+}
+
+function schedTick(t) {
+  try {
+    // コチ（高め短い）
+    var o1 = AC.createOscillator(), g1 = AC.createGain();
+    o1.type = 'square'; o1.frequency.value = 1200;
+    g1.gain.setValueAtTime(0.12, t); g1.gain.exponentialRampToValueAtTime(0.001, t+0.04);
+    o1.connect(g1); g1.connect(MG); o1.start(t); o1.stop(t+0.05);
+  } catch(e){}
+}
+
+function schedNote(freq, t, dur, type, vol) {
+  try {
+    var o = AC.createOscillator(), g = AC.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.setValueAtTime(vol, t + dur * 0.80);
+    g.gain.linearRampToValueAtTime(0, t + dur);
+    o.connect(g); g.connect(MG);
+    o.start(t); o.stop(t + dur + 0.01);
+  } catch(e){}
+}
+function schedKick(t) {
+  try {
+    var o = AC.createOscillator(), g = AC.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(100, t);
+    o.frequency.exponentialRampToValueAtTime(25, t + 0.11);
+    g.gain.setValueAtTime(0.24, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+    o.connect(g); g.connect(MG); o.start(t); o.stop(t + 0.15);
+  } catch(e){}
+}
+function schedSnare(t) {
+  try {
+    var n = Math.floor(AC.sampleRate * 0.08);
+    var buf = AC.createBuffer(1, n, AC.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) d[i] = (Math.random()*2-1) * Math.exp(-i / (n * 0.3));
+    var s = AC.createBufferSource(); s.buffer = buf;
+    var f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1100; f.Q.value = 0.6;
+    var g = AC.createGain(); g.gain.value = 0.11;
+    s.connect(f); f.connect(g); g.connect(MG); s.start(t);
+  } catch(e){}
+}
+function schedHihat(t, vol) {
+  try {
+    var n = Math.floor(AC.sampleRate * 0.025);
+    var buf = AC.createBuffer(1, n, AC.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) d[i] = (Math.random()*2-1) * Math.exp(-i / (n * 0.12));
+    var s = AC.createBufferSource(); s.buffer = buf;
+    var f = AC.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 7000;
+    var g = AC.createGain(); g.gain.value = vol || 0.04;
+    s.connect(f); f.connect(g); g.connect(MG); s.start(t);
+  } catch(e){}
+}
+function se(type) {
+  if (!AC) return;
+  try {
+    var now = AC.currentTime;
+    if (type === 'throw') {
+      var n = Math.floor(AC.sampleRate * 0.06);
+      var buf = AC.createBuffer(1, n, AC.sampleRate); var d = buf.getChannelData(0);
+      for (var i = 0; i < n; i++) d[i] = (Math.random()*2-1) * Math.exp(-i / (n * 0.18));
+      var s = AC.createBufferSource(); s.buffer = buf;
+      var f = AC.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 3500;
+      var g = AC.createGain(); g.gain.value = 0.14;
+      s.connect(f); f.connect(g); g.connect(MG); s.start(now);
+    } else if (type === 'hit') {
+      var o = AC.createOscillator(), g = AC.createGain();
+      o.type = 'square'; o.frequency.setValueAtTime(75, now); o.frequency.exponentialRampToValueAtTime(22, now+0.18);
+      g.gain.setValueAtTime(0.20, now); g.gain.exponentialRampToValueAtTime(0.001, now+0.20);
+      o.connect(g); g.connect(MG); o.start(now); o.stop(now+0.22);
+    } else if (type === 'dodge') {
+      var o = AC.createOscillator(), g = AC.createGain();
+      o.type = 'square'; o.frequency.setValueAtTime(440, now); o.frequency.linearRampToValueAtTime(700, now+0.10);
+      g.gain.setValueAtTime(0.16, now); g.gain.exponentialRampToValueAtTime(0.001, now+0.18);
+      o.connect(g); g.connect(MG); o.start(now); o.stop(now+0.20);
+    } else if (type === 'alert') {
+      for (var ai = 0; ai < 3; ai++) {
+        (function(t2) {
+          var o = AC.createOscillator(), g = AC.createGain();
+          o.type = 'square'; o.frequency.value = 660 + t2*110;
+          g.gain.setValueAtTime(0.18, now+t2*0.1); g.gain.exponentialRampToValueAtTime(0.001, now+t2*0.1+0.12);
+          o.connect(g); g.connect(MG); o.start(now+t2*0.1); o.stop(now+t2*0.1+0.14);
+        })(ai);
+      }
+    } else if (type === 'clear') {
+      var ns = [523,659,784,1047];
+      for (var ni = 0; ni < ns.length; ni++) {
+        (function(f2, t2) {
+          var o = AC.createOscillator(), g = AC.createGain();
+          o.type = 'triangle'; o.frequency.value = f2;
+          g.gain.setValueAtTime(0.13, t2); g.gain.exponentialRampToValueAtTime(0.001, t2+0.28);
+          o.connect(g); g.connect(MG); o.start(t2); o.stop(t2+0.30);
+        })(ns[ni], now + ni*0.13);
+      }
+    } else if (type === 'bump') {
+      var o = AC.createOscillator(), g = AC.createGain();
+      o.type = 'square'; o.frequency.setValueAtTime(80, now);
+      g.gain.setValueAtTime(0.10, now); g.gain.exponentialRampToValueAtTime(0.001, now+0.07);
+      o.connect(g); g.connect(MG); o.start(now); o.stop(now+0.08);
+    }
+  } catch(e){}
+}
+function killAudio() {
+  BGM_ACTIVE = false;
+  if (AC) { try { MG.gain.setValueAtTime(0, AC.currentTime); AC.suspend(); } catch(e){} }
+}
+window.addEventListener('pagehide', killAudio);
+window.addEventListener('beforeunload', killAudio);
+document.addEventListener('visibilitychange', function(){ if(document.hidden) killAudio(); });
+
+// ===========================
+// ゲーム状態
+// ===========================
+var mode = 'start', frame = 0;
+var camX = 0, camY = 0;
+var autoRetTimer = 0, peepTimer = 0, peepTimerMax = 0;
+var throwCD = 0, throwCDMax = 20;
+var noticedTimer = 0, currentRoomIdx = null;
+var shurikens = [], totalPeople = 0, clearSoundPlayed = false;
+var noticeCountdown = 0;
+// 壁ぶつかりエフェクト
+var wallBumpTimer = 0;
+var wallBumpDir = {x:0, y:0};
+// カメラ遷移テキスト
+var cameraHintTimer = 0;
+
+var MAP_W = W*2.8, MAP_H = H*2.8;
+var camX = MAP_W/2, camY = MAP_H/2;
+var player = {x:MAP_W/2, y:MAP_H/2, vx:0, vy:0, walkFrame:0, angle:0};
+
+// ===========================
+// 穴
+// ===========================
+var HOLES = [
+  {id:0,x:MAP_W*0.17,y:MAP_H*0.16,w:26,h:8},
+  {id:1,x:MAP_W*0.67,y:MAP_H*0.23,w:24,h:8},
+  {id:2,x:MAP_W*0.32,y:MAP_H*0.50,w:28,h:9},
+  {id:3,x:MAP_W*0.74,y:MAP_H*0.67,w:24,h:8},
+  {id:4,x:MAP_W*0.14,y:MAP_H*0.79,w:26,h:8}
+];
+
+// ===========================
+// 部屋
+// ===========================
+var ROOM_DEFS = [
+  {type:'bedroom',name:'寝室',timeMax:700,shuMax:6},
+  {type:'dining',name:'食事処',timeMax:700,shuMax:7},
+  {type:'study',name:'書斎',timeMax:700,shuMax:6},
+  {type:'living',name:'居間',timeMax:650,shuMax:5},
+  {type:'guard',name:'見張り',timeMax:550,shuMax:8}
+];
+var ROOM_ACTS = {
+  bedroom:['sleep','sleep','sit'],
+  dining:['eat','eat','eat','sit'],
+  study:['read','read','sit'],
+  living:['sit','sit','walk'],
+  guard:['patrol','patrol','stand']
+};
+var ROOM_POS = {
+  bedroom:[[0.28,0.44],[0.67,0.55],[0.18,0.70],[0.72,0.30]],
+  dining:[[0.33,0.50],[0.52,0.60],[0.67,0.50],[0.50,0.38]],
+  study:[[0.65,0.38],[0.28,0.55],[0.70,0.65],[0.30,0.30]],
+  living:[[0.30,0.52],[0.62,0.52],[0.48,0.35],[0.50,0.70]],
+  guard:[[0.28,0.38],[0.65,0.55],[0.48,0.72],[0.20,0.60]]
+};
+
+// 職業・個性定義
+var JOBS_BY_ROOM = {
+  bedroom: ['武士','侍女','子供','老人'],
+  dining:  ['料理人','給仕','商人','客人'],
+  study:   ['学者','書生','絵師','医師'],
+  living:  ['御隠居','奥方','下女','客人'],
+  guard:   ['番兵','侍','浪人','忍び']
+};
+var JOB_COLORS = {
+  '武士':'#1C3870','侍女':'#C0406A','子供':'#E07820','老人':'#708090',
+  '料理人':'#A04010','給仕':'#284888','商人':'#608020','客人':'#506060',
+  '学者':'#305090','書生':'#487030','絵師':'#904870','医師':'#308060',
+  '御隠居':'#605050','奥方':'#C03060','下女':'#486040','客人':'#506060',
+  '番兵':'#1C3050','侍':'#2C2050','浪人':'#504030','忍び':'#181820'
+};
+
+function makePerson(rt, idx) {
+  var acts = ROOM_ACTS[rt]||['walk'];
+  var act = acts[idx % acts.length];
+  var pos = ROOM_POS[rt]||[[0.5,0.5]];
+  var pp = pos[idx % pos.length];
+  var px = pp[0]*W + (Math.random()-0.5)*14;
+  var py = pp[1]*H + (Math.random()-0.5)*14;
+  var initAngle = (act==='sleep') ? (Math.floor(Math.random()*4)*Math.PI/2) : Math.random()*Math.PI*2;
+  var isFemale = Math.random() < 0.45;
+  var isOld    = Math.random() < 0.2;
+  var isChild  = Math.random() < 0.15;
+  var jobs = JOBS_BY_ROOM[rt]||['住人'];
+  var job  = jobs[idx % jobs.length];
+  var jcol = JOB_COLORS[job]||'#404040';
+  return {
+    x:px, y:py, tx:px, ty:py, vx:0, vy:0,
+    activity:act, moving:false, walkFrame:0,
+    restTimer:60+Math.random()*120, patrolStep:idx%4,
+    dead:false, deadTimer:0,
+    skin:SKINS[Math.floor(Math.random()*SKINS.length)],
+    shirt:jcol,
+    hair:isFemale?'#281008':(isOld?'#C0C0B0':HAIRS[Math.floor(Math.random()*HAIRS.length)]),
+    longHair:isFemale,
+    angle:initAngle,
+    mouthShape:Math.floor(Math.random()*3),
+    lookUpTimer:Math.floor(100+Math.random()*160),
+    lookUpDur:0,
+    isLookingUp:false,
+    state:'normal',
+    alertTarget:{x:0,y:0},
+    alertTimer:0,
+    surpriseTimer:0,
+    investigateTimer:0,
+    // 個性
+    isFemale:isFemale, isOld:isOld, isChild:isChild,
+    job:job
+  };
+}
+
+var ROOMS = [];
+for (var ri = 0; ri < HOLES.length; ri++) {
+  var def = ROOM_DEFS[ri];
+  var cnt = (def.type==='guard') ? 2+Math.floor(Math.random()*2) : 2+Math.floor(Math.random()*3);
+  var ppl = [];
+  for (var pi = 0; pi < cnt; pi++) ppl.push(makePerson(def.type, pi));
+  ROOMS.push({holeId:ri, def:def, people:ppl, cleared:false});
+}
+for (var i = 0; i < ROOMS.length; i++) totalPeople += ROOMS[i].people.length;
+
+var DUST = [];
+for (var i = 0; i < 40; i++) {
+  DUST.push({x:Math.random()*MAP_W, y:Math.random()*MAP_H, vx:(Math.random()-0.5)*0.12, vy:-Math.random()*0.08-0.015, alpha:Math.random()*0.28+0.05, size:Math.random()*1.2+0.3, life:Math.random()*400+100});
+}
+
+// ===========================
+// ユーティリティ
+// ===========================
+function wsx(wx){return wx-camX+W/2;}
+function wsy(wy){return wy-camY+H/2;}
+function nearHole(){
+  for(var i=0;i<HOLES.length;i++){
+    var h=HOLES[i]; if(ROOMS[h.id].cleared) continue;
+    if(Math.abs(player.x-h.x)<h.w*3.5&&Math.abs(player.y-h.y)<h.h*6) return h;
+  }
+  return null;
+}
+function killCount(){
+  var n=0;
+  for(var i=0;i<ROOMS.length;i++) for(var j=0;j<ROOMS[i].people.length;j++) if(ROOMS[i].people[j].dead) n++;
+  return n;
+}
+function hitWall(nx,ny){return nx<10||nx>MAP_W-10||ny<12||ny>MAP_H-12;}
+
+// テキスト（影付き・視認性向上）
+function drawTextShadow(txt,x,y,col,sz,align){
+  ctx.textAlign=align||'left';ctx.font=(sz||11)+'px monospace';
+  ctx.fillStyle='rgba(0,0,0,0.85)';
+  for(var ox=-1;ox<=1;ox++) for(var oy=-1;oy<=1;oy++) if(ox||oy) ctx.fillText(txt,x+ox,y+oy);
+  ctx.fillStyle=col;ctx.fillText(txt,x,y);
+}
+
+// ===========================
+// ドットヘルパー（PS=4 粗め）
+// ===========================
+var PS = 1;
+function spr(sx,sy,dx,dy,dw,dh,col){ctx.fillStyle=col;ctx.fillRect((sx+dx*PS)|0,(sy+dy*PS)|0,dw*PS,dh*PS);}
+function px1(sx,sy,dx,dy,col){ctx.fillStyle=col;ctx.fillRect((sx+dx*PS)|0,(sy+dy*PS)|0,PS,PS);}
+
+// ===========================
+// 屋根裏描画（SNES風・明るい）
+// ===========================
+function drawAttic(){
+  // 背景（暗め）
+  ctx.fillStyle='#7A6440'; ctx.fillRect(0,0,W,H);
+
+  // 床板（カメラは整数済みなのでガタつかない）
+  var PH=14, GAP=2, STEP=PH+GAP;
+  var oy=((-(camY%STEP))+STEP)%STEP;
+  for(var ty=-oy-STEP;ty<H+STEP;ty+=STEP){
+    var wy=ty+camY-H/2;
+    var seed=(Math.abs(Math.floor((wy+50000)/STEP))*11+3)%7;
+    var cols=['#8C6428','#784E18','#906830','#7A5218','#886030'];
+    ctx.fillStyle=cols[seed%cols.length];
+    ctx.fillRect(0,ty,W,PH);
+    ctx.fillStyle='rgba(0,0,0,0.13)';
+    for(var gx=0;gx<W;gx+=28+seed*5) ctx.fillRect(gx,ty,seed%3+1,PH);
+    ctx.fillStyle='rgba(255,210,80,0.05)'; ctx.fillRect(0,ty,W,2);
+    ctx.fillStyle='#3A1A04'; ctx.fillRect(0,ty+PH,W,GAP);
+  }
+  var ox=((-(camX%36))+36)%36;
+  ctx.fillStyle='rgba(0,0,0,0.18)';
+  for(var tx=-ox;tx<W+36;tx+=36) ctx.fillRect(tx,0,1,H);
+
+  // 横梁
+  var beamYs=[0.10,0.28,0.48,0.68,0.88];
+  for(var byi=0;byi<beamYs.length;byi++){
+    var bwy=MAP_H*beamYs[byi], bsy=wsy(bwy)|0;
+    if(bsy>H+20||bsy<-20) continue;
+    ctx.fillStyle=P.BM; ctx.fillRect(0,bsy,W,12);
+    ctx.fillStyle=P.BL; ctx.fillRect(0,bsy,W,4);
+    ctx.fillStyle='rgba(0,0,0,0.22)'; ctx.fillRect(0,bsy+10,W,2);
+    ctx.fillStyle='rgba(80,30,0,0.09)';
+    for(var bx2=0;bx2<W;bx2+=22) ctx.fillRect(bx2,bsy,1,12);
+  }
+  // 縦柱
+  var pilXs=[0.08,0.28,0.50,0.72,0.92];
+  for(var pxi=0;pxi<pilXs.length;pxi++){
+    var pwx=MAP_W*pilXs[pxi], psx=wsx(pwx)|0;
+    if(psx>W+10||psx<-10) continue;
+    ctx.fillStyle=P.BM; ctx.fillRect(psx-4,0,9,H);
+    ctx.fillStyle=P.BL; ctx.fillRect(psx-4,0,3,H);
+    ctx.fillStyle='rgba(0,0,0,0.18)'; ctx.fillRect(psx+3,0,2,H);
+  }
+
+  // 蜘蛛の巣
+  ctx.strokeStyle='rgba(200,180,130,0.14)'; ctx.lineWidth=0.5;
+  var corners=[[0,0,1,1],[W,0,-1,1],[0,H,1,-1],[W,H,-1,-1]];
+  for(var ci=0;ci<corners.length;ci++){
+    var cc=corners[ci];
+    for(var cs=0;cs<6;cs++){ctx.beginPath();ctx.moveTo(cc[0],cc[1]);ctx.lineTo(cc[0]+cc[2]*45*(cs/5),cc[1]+cc[3]*45*(1-cs/5));ctx.stroke();}
+    for(var cr=1;cr<=3;cr++){ctx.beginPath();for(var cs2=0;cs2<=5;cs2++){var cx2=cc[0]+cc[2]*45*(cr/4)*(1-cs2/5),cy2=cc[1]+cc[3]*45*(cr/4)*(cs2/5);cs2===0?ctx.moveTo(cx2,cy2):ctx.lineTo(cx2,cy2);}ctx.stroke();}
+  }
+
+  // 穴
+  for(var hi=0;hi<HOLES.length;hi++){
+    var h=HOLES[hi];
+    var hsx=wsx(h.x)|0, hsy=wsy(h.y)|0;
+    var rm=ROOMS[h.id];
+    if(hsx<-60||hsx>W+60||hsy<-30||hsy>H+30) continue;
+    if(rm.cleared){ctx.fillStyle='#181006';ctx.fillRect(hsx-h.w/2|0,hsy-h.h/2|0,h.w,h.h);continue;}
+    for(var gl=6;gl>=0;gl--){var mg=gl*9;ctx.fillStyle='rgba(255,220,80,'+(0.013*(7-gl))+')';ctx.fillRect(hsx-h.w/2-mg|0,hsy-h.h/2-mg*0.4|0,h.w+mg*2,h.h+mg*0.8);}
+    ctx.fillStyle='#FFF4B0';ctx.fillRect(hsx-h.w/2|0,hsy-h.h/2|0,h.w,h.h);
+    ctx.fillStyle='rgba(200,170,50,0.5)';ctx.fillRect(hsx-h.w/2|0,hsy|0,h.w,h.h/2);
+    ctx.fillStyle='#1A0C04';ctx.fillRect(hsx-h.w/2-1|0,hsy-h.h/2-2|0,h.w+2,2);ctx.fillRect(hsx-h.w/2-1|0,hsy+h.h/2|0,h.w+2,2);
+    for(var lpi=0;lpi<rm.people.length;lpi++){
+      var lp=rm.people[lpi];if(lp.dead) continue;
+      var rlx=(lp.x/W-0.5)*h.w*0.42, rly=(lp.y/H-0.5)*h.h*0.42;
+      var ppx=hsx+rlx|0, ppy=hsy+rly|0;
+      if(ppx>hsx-h.w/2+1&&ppx<hsx+h.w/2-1&&ppy>hsy-h.h/2&&ppy<hsy+h.h/2){ctx.fillStyle='rgba(20,8,2,0.9)';ctx.fillRect(ppx,ppy,2,3);}
+    }
+  }
+
+  // 埃
+  for(var di=0;di<DUST.length;di++){
+    var dp=DUST[di];
+    var dsx=wsx(dp.x)|0,dsy=wsy(dp.y)|0;
+    if(dsx<0||dsx>W||dsy<0||dsy>H) continue;
+    ctx.fillStyle='rgba(210,190,130,'+dp.alpha+')';ctx.fillRect(dsx,dsy,1,1);
+  }
+
+  drawNinja();
+
+  // 暗いオーバーレイ（全体的に暗くする）
+  ctx.fillStyle='rgba(0,0,0,0.30)'; ctx.fillRect(0,0,W,H);
+
+  // 斜め光（弱め）
+  var lg=ctx.createLinearGradient(W,0,W*0.2,H*0.5);
+  lg.addColorStop(0,'rgba(255,220,100,0.04)');lg.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=lg;ctx.fillRect(0,0,W,H);
+
+  // ビネット（強め）
+  var vg=ctx.createRadialGradient(W/2,H/2,H*0.08,W/2,H/2,H*0.72);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,0.65)');
+  ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+
+  // 壁ぶつかりエフェクト
+  if(wallBumpTimer>0){
+    var ba=wallBumpTimer/14;
+    ctx.fillStyle='rgba(240,60,10,'+ba*0.32+')';
+    // 方向側を光らせる
+    var ew=12, ew2=Math.min(ew+8,28)*ba;
+    if(wallBumpDir.x<0) ctx.fillRect(0,0,ew2,H);
+    if(wallBumpDir.x>0) ctx.fillRect(W-ew2,0,ew2,H);
+    if(wallBumpDir.y<0) ctx.fillRect(0,0,W,ew2);
+    if(wallBumpDir.y>0) ctx.fillRect(0,H-ew2,W,ew2);
+    // ×マーク（SNES風）
+    drawTextShadow('✕',W/2,H/2+4,'#FF4422',22,'center');
+  }
+
+  // HUD
+  var cl=0;for(var i=0;i<ROOMS.length;i++) if(ROOMS[i].cleared) cl++;
+  drawTextShadow('KILL '+killCount()+'/'+totalPeople,W-10,18,P.YL,10,'right');
+  drawTextShadow('部屋 '+cl+'/'+ROOMS.length,W-10,32,P.WH,10,'right');
+
+  var nh=nearHole();
+  if(nh){
+    // 穴の近くに来たら大きく表示
+    var bt=Math.sin(frame*0.14)*0.3+0.7;
+    ctx.fillStyle='rgba(0,0,0,0.6)';ctx.fillRect(W/2-80,H-52,160,28);
+    drawTextShadow('▼  覗く  ▼',W/2,H-32,P.YL,13,'center');
+  }
+
+  // カメラ遷移ヒント（初回）
+  if(cameraHintTimer>0){
+    var ha=Math.min(1,cameraHintTimer/30);
+    ctx.fillStyle='rgba(10,8,20,'+ha*0.72+')';ctx.fillRect(W/2-120,H/2+28,240,54);
+    ctx.fillStyle='rgba(100,180,255,'+ha+')';ctx.font='10px monospace';ctx.textAlign='center';
+    ctx.fillText('← 部屋を上から覗いている →',W/2,H/2+48);
+    ctx.fillStyle='rgba(255,240,160,'+ha+')';
+    ctx.fillText('スワイプで手裏剣を投げる',W/2,H/2+66);
+    cameraHintTimer--;
+  }
+}
+
+// ===========================
+// 忍者（屋根裏・固定px・かわいいちびキャラ）
+// ===========================
+function drawNinja(){
+  var sx=wsx(player.x)|0, sy=wsy(player.y)|0;
+  var mv=Math.abs(player.vx)>0.1||Math.abs(player.vy)>0.1;
+  var wf=Math.floor(player.walkFrame/7)%2;
+  var D=3; // 1ブロック=3px
+
+  // 影
+  ctx.fillStyle='rgba(0,0,0,0.22)';
+  ctx.fillRect(sx-10,sy+14,20,5);
+
+  // 足（白足袋・交互）
+  var lly = mv&&wf ? 2:0;
+  var rly = mv&&!wf ? 2:0;
+  ctx.fillStyle='#B8C0D4'; ctx.fillRect(sx-8,sy+8+lly,7,8);
+  ctx.fillStyle='#B8C0D4'; ctx.fillRect(sx+1,sy+8+rly,7,8);
+  ctx.fillStyle=P.NB;      ctx.fillRect(sx-8,sy+4+lly,7,6);
+  ctx.fillStyle=P.NB;      ctx.fillRect(sx+1,sy+4+rly,7,6);
+
+  // 胴（青忍装束）
+  ctx.fillStyle=P.NB2; ctx.fillRect(sx-9,sy-8,18,14);
+  // 格子柄
+  ctx.fillStyle=P.NBL;
+  ctx.fillRect(sx-6,sy-5,3,3); ctx.fillRect(sx+0,sy-5,3,3); ctx.fillRect(sx+6,sy-5,3,3);
+  ctx.fillRect(sx-3,sy-1,3,3); ctx.fillRect(sx+3,sy-1,3,3);
+  // 帯
+  ctx.fillStyle='#0C1830'; ctx.fillRect(sx-9,sy+4,18,2);
+
+  // 腕（歩きアニメ）
+  var lay = mv&&wf  ?  3 : 0;
+  var ray = mv&&!wf ?  3 : 0;
+  ctx.fillStyle=P.NB2; ctx.fillRect(sx-14,sy-6+lay,6,10);
+  ctx.fillStyle=P.NB2; ctx.fillRect(sx+8, sy-6+ray,6,10);
+  // 手（肌色・小さな四角）
+  ctx.fillStyle=P.SK; ctx.fillRect(sx-13,sy+3+lay,4,4);
+  ctx.fillStyle=P.SK; ctx.fillRect(sx+9, sy+3+ray,4,4);
+
+  // 刀（背中・先に描くので頭の後ろに隠れる）
+  ctx.save(); ctx.translate(sx+7,sy-12); ctx.rotate(-0.52);
+  ctx.fillStyle='#111111'; ctx.fillRect(-2,-20,4,26);
+  ctx.fillStyle='#C8A018'; ctx.fillRect(-5,-1,10,5);
+  ctx.fillStyle='#E8C020'; ctx.fillRect(-2,0,4,3);
+  ctx.fillStyle='#090909'; ctx.fillRect(-2,-22,4,21);
+  ctx.restore();
+
+  // 首
+  ctx.fillStyle=P.SK; ctx.fillRect(sx-3,sy-11,6,4);
+
+  // 頭巾（大きな丸頭）
+  ctx.fillStyle=P.NB; ctx.fillRect(sx-11,sy-28,22,18); // 頭本体
+  ctx.fillStyle=P.NB2;ctx.fillRect(sx-9, sy-27,18,15); // 内側（明るい）
+  // とんがり（後頭部右）
+  ctx.fillStyle=P.NB; ctx.fillRect(sx+8,sy-32,8,8);
+  ctx.fillStyle=P.NB; ctx.fillRect(sx+11,sy-36,5,6);
+
+  // 鉢巻（水色）
+  ctx.fillStyle=P.NND; ctx.fillRect(sx-9,sy-26,18,5);
+
+  // 顔（肌色エリア）
+  ctx.fillStyle=P.SK; ctx.fillRect(sx-7,sy-22,14,12);
+
+  // 眉（2本のライン・シンプル）
+  ctx.fillStyle=P.HA;
+  ctx.fillRect(sx-6,sy-19,4,2);
+  ctx.fillRect(sx+2,sy-19,4,2);
+
+  // 目（小さい点・自然なサイズ）
+  ctx.fillStyle=P.HA;
+  ctx.fillRect(sx-5,sy-16,3,3); // 左目
+  ctx.fillRect(sx+2,sy-16,3,3); // 右目
+  ctx.fillStyle='#FFFFFF';
+  ctx.fillRect(sx-5,sy-16,1,1); // 左ハイライト
+  ctx.fillRect(sx+2,sy-16,1,1); // 右ハイライト
+
+  // 口覆い（鼻から下を青布で隠す）
+  ctx.fillStyle=P.NB; ctx.fillRect(sx-7,sy-13,14,6);
+}
+
+// ===========================
+// 覗き部屋描画
+// ===========================
+function drawPeepRoom(){
+  var room=ROOMS[currentRoomIdx];
+  var hole=HOLES[currentRoomIdx];
+  var def=room.def;
+  drawRoomFloor(def.type);
+  drawFurniture(def.type);
+  for(var ppi=0;ppi<room.people.length;ppi++) drawPersonDot(room.people[ppi]);
+
+  // 手裏剣（大きく・くっきり）
+  for(var shi=0;shi<shurikens.length;shi++){
+    var sh=shurikens[shi];
+    ctx.save();ctx.translate(sh.x|0,sh.y|0);ctx.rotate(sh.rot);
+    // 外枠（黒）
+    ctx.fillStyle='#101008';
+    ctx.fillRect(-2,-16,4,32);ctx.fillRect(-16,-2,32,4);
+    // 本体（金属色）
+    ctx.fillStyle='#90A870';
+    ctx.fillRect(-1,-14,3,28);ctx.fillRect(-14,-1,28,3);
+    // 中央（光沢）
+    ctx.fillStyle='#C8E090';
+    ctx.fillRect(-1,-8,3,16);ctx.fillRect(-8,-1,16,3);
+    // 中心点
+    ctx.fillStyle='#E8F8B0';
+    ctx.fillRect(-2,-2,5,5);
+    ctx.restore();
+  }
+
+  // ===== 天井の穴＋忍者「覗いてる」シーン =====
+  var hx=W/2|0, hy=36;
+  var hw=80, hh=18; // 穴サイズ（固定・コンパクト）
+
+  // 天井板（上1/4）
+  ctx.fillStyle='#2A1C0C';
+  ctx.fillRect(0,0,W,hy+hh/2+18);
+
+  // 板の木目（横線）
+  ctx.fillStyle='#3A2810';
+  for(var bty=4;bty<hy+hh/2+14;bty+=10) ctx.fillRect(0,bty,W,4);
+  ctx.fillStyle='#4A3818';
+  for(var bty2=0;bty2<hy+hh/2+14;bty2+=10) ctx.fillRect(0,bty2,W,2);
+
+  // 穴の縁（木材・太め）
+  ctx.fillStyle='#8A5C20'; ctx.fillRect(hx-hw/2-4,hy-hh/2-4,hw+8,hh+8);
+  ctx.fillStyle='#C08030'; ctx.fillRect(hx-hw/2-2,hy-hh/2-2,hw+4,4);
+  ctx.fillStyle='#C08030'; ctx.fillRect(hx-hw/2-2,hy+hh/2-2,hw+4,4);
+  // 穴本体（暗い）
+  ctx.fillStyle='#060402'; ctx.fillRect(hx-hw/2,hy-hh/2,hw,hh);
+  // 穴から漏れる光
+  ctx.fillStyle='rgba(220,185,70,0.10)'; ctx.fillRect(hx-hw/2,hy+hh/2,hw,44);
+
+  // ── 忍者ドット（穴から顔だけ出してる） ──
+  var nx=hx, ny=hy+hh/2; // 穴の下縁が基準
+
+  // 顔（穴からちょっとだけ覗いてる・かわいい丸頭）
+  // 首
+  ctx.fillStyle=P.NB;
+  ctx.fillRect(nx-7, hy-hh/2-14, 14, 12);
+
+  // 頭巾（青・大きな丸）
+  ctx.fillStyle=P.NB2;
+  ctx.fillRect(nx-18, hy-hh/2-46, 36, 34);
+  // 角丸っぽく（四隅を削る）
+  ctx.fillStyle='#060402'; // 天井色で上書き
+  ctx.fillRect(nx-18, hy-hh/2-46, 4, 4);
+  ctx.fillRect(nx+14, hy-hh/2-46, 4, 4);
+  ctx.fillRect(nx-18, hy-hh/2-16, 4, 4);
+  ctx.fillRect(nx+14, hy-hh/2-16, 4, 4);
+  // とんがり（右後ろ）
+  ctx.fillStyle=P.NB;
+  ctx.fillRect(nx+12, hy-hh/2-50, 8, 8);
+  ctx.fillRect(nx+16, hy-hh/2-54, 6, 6);
+
+  // バンド（水色）
+  ctx.fillStyle=P.NND;
+  ctx.fillRect(nx-18, hy-hh/2-38, 36, 8);
+  // 星ドット×3
+  ctx.fillStyle='#3860C0';
+  for(var si4c=0;si4c<3;si4c++){
+    var stx3=nx-10+si4c*10;
+    ctx.fillRect(stx3,hy-hh/2-37,4,6);
+    ctx.fillRect(stx3-2,hy-hh/2-35,8,2);
+  }
+
+  // 顔（肌・かわいめサイズ）
+  ctx.fillStyle=P.SK;
+  ctx.fillRect(nx-12, hy-hh/2-32, 24, 18);
+  // ほっぺ（赤・かわいい）
+  ctx.fillStyle='rgba(240,100,80,0.45)';
+  ctx.fillRect(nx-14, hy-hh/2-24, 6, 6);
+  ctx.fillRect(nx+8,  hy-hh/2-24, 6, 6);
+  // 鼻（小さい丸）
+  ctx.fillStyle=P.SKD;
+  ctx.fillRect(nx-2, hy-hh/2-22, 4, 4);
+
+  // 眉（ハの字・ほどほど怒り）
+  ctx.fillStyle=P.HA;
+  ctx.fillRect(nx-11, hy-hh/2-28, 8, 3);
+  ctx.fillRect(nx+3,  hy-hh/2-28, 8, 3);
+  // 眉の内側を1px上げる（逆ハの字にしない・かわいい怒り）
+  ctx.fillRect(nx-10, hy-hh/2-30, 4, 2);
+  ctx.fillRect(nx+6,  hy-hh/2-30, 4, 2);
+
+  // 目（大きめ丸・かわいい・下向き）
+  ctx.fillStyle=P.HA;
+  ctx.fillRect(nx-10, hy-hh/2-24, 8, 8);
+  ctx.fillRect(nx+2,  hy-hh/2-24, 8, 8);
+  // ハイライト（白・左上）
+  ctx.fillStyle='#FFFFFF';
+  ctx.fillRect(nx-10, hy-hh/2-24, 3, 3);
+  ctx.fillRect(nx+2,  hy-hh/2-24, 3, 3);
+  // 目の下に影（下向き感）
+  ctx.fillStyle='rgba(0,0,0,0.25)';
+  ctx.fillRect(nx-10, hy-hh/2-18, 8, 2);
+  ctx.fillRect(nx+2,  hy-hh/2-18, 8, 2);
+
+  // 口覆い（紺・下半分）
+  ctx.fillStyle=P.NB;
+  ctx.fillRect(nx-12, hy-hh/2-18, 24, 10);
+
+  // 穴の手前縁（影・忍者が穴から出てる感）
+  ctx.fillStyle='rgba(0,0,0,0.50)';
+  ctx.fillRect(hx-hw/2, hy-hh/2, hw, 4);
+
+  // ビネット
+  var vg=ctx.createRadialGradient(W/2,H/2,H*0.2,W/2,H/2,H*0.86);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,0.36)');
+  ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+
+  drawPeepHUD(def,room);
+}
+
+// ===========================
+// 床・家具
+// ===========================
+function drawRoomFloor(type){
+  if(type==='guard'){
+    ctx.fillStyle=P.TF;ctx.fillRect(0,0,W,H);
+    for(var ty3=0;ty3<H;ty3+=24){
+      ctx.fillStyle=(Math.floor(ty3/24)%2===0)?'#C09050':'#A87840';
+      ctx.fillRect(0,ty3,W,23);ctx.fillStyle='rgba(0,0,0,0.12)';ctx.fillRect(0,ty3+23,W,1);
+    }
+  } else {
+    ctx.fillStyle=P.TA;ctx.fillRect(0,0,W,H);
+    var TW=72,TH=108;
+    for(var tx4=0;tx4<W;tx4+=TW) for(var ty4=0;ty4<H;ty4+=TH){
+      ctx.fillStyle=((Math.floor(tx4/TW)+Math.floor(ty4/TH))%2===0)?P.TA:P.TA2;
+      ctx.fillRect(tx4,ty4,TW-1,TH-1);
+      ctx.fillStyle='rgba(0,0,0,0.05)';
+      for(var giy=12;giy<TH;giy+=14) ctx.fillRect(tx4,ty4+giy,TW-1,1);
+      ctx.fillStyle='rgba(0,0,0,0.08)';ctx.fillRect(tx4,ty4,TW-1,2);
+    }
+  }
+}
+
+function drawFurniture(type){
+  if(type==='bedroom'){
+    dFuton(W*0.28|0,H*0.44|0,'#3A2A18'); dFuton(W*0.68|0,H*0.55|0,'#2A3A28');
+    dPillow(W*0.28|0,H*0.44-60|0);      dPillow(W*0.68|0,H*0.55-60|0);
+    // 化粧台
+    ctx.fillStyle='#5A3A10'; ctx.fillRect(W*0.78|0,H*0.30|0,44,30);
+    ctx.fillStyle='#EEE8C0'; ctx.fillRect(W*0.78+8|0,H*0.30+4|0,28,20); // 鏡
+    ctx.fillStyle='rgba(220,240,255,0.4)'; ctx.fillRect(W*0.78+10|0,H*0.30+6|0,24,16);
+    ctx.fillStyle='#8A5A20'; ctx.fillRect(W*0.78|0,H*0.30+30|0,44,8); // 引き出し
+    // 着物掛け
+    ctx.fillStyle='#6A3010'; ctx.fillRect(W*0.10|0,H*0.22|0,6,52);
+    ctx.fillStyle='#A84060'; ctx.fillRect(W*0.10-14|0,H*0.22+4|0,34,38); // 着物
+    ctx.fillStyle='rgba(180,60,90,0.4)'; ctx.fillRect(W*0.10-12|0,H*0.24|0,30,8);
+    dAndon(W*0.50|0,H*0.14|0);
+  } else if(type==='dining'){
+    dTable(W*0.50|0,H*0.52|0);
+    // 座布団4枚
+    for(var b=0;b<4;b++){
+      var bx=W*0.50+Math.cos(b*Math.PI/2)*42|0,by=H*0.52+Math.sin(b*Math.PI/2)*28|0;
+      dZabuton(bx,by);
+    }
+    // 食器（テーブル上）
+    ctx.fillStyle='#C0C0A0'; ctx.fillRect(W*0.50-16|0,H*0.52-10|0,10,8);
+    ctx.fillStyle='#D0B890'; ctx.fillRect(W*0.50+6|0,H*0.52-10|0,10,8);
+    ctx.fillStyle='#E8C870'; ctx.fillRect(W*0.50-4|0,H*0.52+4|0,8,4); // 箸
+    // 棚
+    ctx.fillStyle='#3A2008'; ctx.fillRect(W*0.06|0,H*0.18|0,28,80);
+    for(var sk=0;sk<4;sk++){ctx.fillStyle='#7A5020';ctx.fillRect(W*0.06|0,H*0.18+sk*18|0,28,4);}
+    ctx.fillStyle='#C08840'; ctx.fillRect(W*0.07|0,H*0.20|0,12,12); // 器
+    ctx.fillStyle='#A05828'; ctx.fillRect(W*0.07|0,H*0.38|0,12,14); // 壺
+    dAndon(W*0.14|0,H*0.16|0); dAndon(W*0.84|0,H*0.16|0);
+  } else if(type==='study'){
+    dDesk(W*0.60|0,H*0.42|0);
+    // 本棚（大きめ）
+    ctx.fillStyle='#1E1408'; ctx.fillRect(W*0.06|0,H*0.16|0,26,200);
+    for(var sh=0;sh<10;sh++){ctx.fillStyle=SHIRTS[sh%SHIRTS.length];ctx.fillRect(W*0.07|0,H*0.18+sh*18|0,20,14);}
+    ctx.fillStyle='#7A5820'; ctx.fillRect(W*0.06|0,H*0.16|0,26,4);
+    ctx.fillStyle='#7A5820'; ctx.fillRect(W*0.06|0,H*0.16+100|0,26,4);
+    // 硯・筆
+    ctx.fillStyle='#282828'; ctx.fillRect(W*0.60-18|0,H*0.42-10|0,20,12); // 硯
+    ctx.fillStyle='#181818'; ctx.fillRect(W*0.60+8|0,H*0.42-16|0,3,22);   // 筆柄
+    ctx.fillStyle='#F8F0D8'; ctx.fillRect(W*0.60+7|0,H*0.42-16|0,5,7);    // 紙
+    // 丸椅子
+    ctx.fillStyle='#4A3010'; ctx.fillRect(W*0.60-8|0,H*0.42+20|0,16,14);
+    ctx.fillStyle='#6A4818'; ctx.fillRect(W*0.60-7|0,H*0.42+20|0,14,5);
+    // 屏風
+    ctx.fillStyle='#805010'; ctx.fillRect(W*0.75|0,H*0.18|0,10,110);
+    ctx.fillStyle='#C09030'; ctx.fillRect(W*0.75+2|0,H*0.20|0,6,106);
+    ctx.fillStyle='rgba(220,170,50,0.25)'; ctx.fillRect(W*0.75+3|0,H*0.22|0,4,30);
+    ctx.fillStyle='rgba(80,120,60,0.3)'; ctx.fillRect(W*0.75+3|0,H*0.54|0,4,40);
+    dAndon(W*0.73|0,H*0.14|0); dAndon(W*0.88|0,H*0.80|0);
+  } else if(type==='living'){
+    // 囲炉裏（大きめ）
+    ctx.fillStyle='#181008'; ctx.fillRect(W*0.50-28|0,H*0.46-20|0,56,40);
+    ctx.fillStyle='#2A1C0C'; ctx.fillRect(W*0.50-24|0,H*0.46-16|0,48,32);
+    ctx.fillStyle='#C03808'; ctx.fillRect(W*0.50-14|0,H*0.46-8|0,28,18);
+    ctx.fillStyle='#FF6810'; ctx.fillRect(W*0.50-8|0,H*0.46-4|0,16,10);
+    ctx.fillStyle='#FFB820'; ctx.fillRect(W*0.50-4|0,H*0.46-2|0,8,5);
+    // 自在鉤（縄で吊り下げた鉄瓶）
+    ctx.fillStyle='rgba(80,60,40,0.6)'; ctx.fillRect(W*0.50-1|0,H*0.15|0,2,26);
+    ctx.fillStyle='#604820'; ctx.fillRect(W*0.50-7|0,H*0.40|0,14,18); // 鉄瓶
+    // 座布団3枚
+    dZabuton(W*0.28|0,H*0.56|0); dZabuton(W*0.65|0,H*0.56|0); dZabuton(W*0.50|0,H*0.74|0);
+    // 棚（右）
+    ctx.fillStyle='#3C2408'; ctx.fillRect(W*0.80|0,H*0.20|0,30,100);
+    ctx.fillStyle='#6A4210'; ctx.fillRect(W*0.80|0,H*0.20|0,30,4);
+    ctx.fillStyle='#6A4210'; ctx.fillRect(W*0.80|0,H*0.54|0,30,4);
+    ctx.fillStyle='#C09040'; ctx.fillRect(W*0.82|0,H*0.24|0,18,22); // 壺
+    // 小屏風
+    ctx.fillStyle='#6A3C10'; ctx.fillRect(W*0.06|0,H*0.20|0,8,90);
+    ctx.fillStyle='#B07030'; ctx.fillRect(W*0.06+2|0,H*0.22|0,4,86);
+    dAndon(W*0.13|0,H*0.14|0); dAndon(W*0.84|0,H*0.14|0);
+  } else if(type==='guard'){
+    // 武器架け（大きめ）
+    ctx.fillStyle='#1C1208'; ctx.fillRect(W*0.78|0,H*0.14|0,22,150);
+    ctx.fillStyle='#B0B090'; ctx.fillRect(W*0.78+6|0,H*0.20|0,4,100);
+    ctx.fillStyle='#909080'; ctx.fillRect(W*0.78+13|0,H*0.22|0,4,90);
+    ctx.fillStyle='#686050'; ctx.fillRect(W*0.78+2|0,H*0.22+18|0,14,5);
+    ctx.fillStyle='#686050'; ctx.fillRect(W*0.78+2|0,H*0.22+50|0,14,5);
+    ctx.fillStyle='#C8A018'; ctx.fillRect(W*0.78+3|0,H*0.22+10|0,8,5); // 鍔
+    ctx.fillStyle='#C8A018'; ctx.fillRect(W*0.78+10|0,H*0.22+42|0,8,5);
+    // 見張り台（椅子っぽいもの）
+    ctx.fillStyle='#3C2410'; ctx.fillRect(W*0.18|0,H*0.40|0,36,30);
+    ctx.fillStyle='#5A3818'; ctx.fillRect(W*0.18|0,H*0.40|0,36,8);
+    ctx.fillStyle='#2A1808'; ctx.fillRect(W*0.18|0,H*0.70|0,8,18); // 脚
+    ctx.fillStyle='#2A1808'; ctx.fillRect(W*0.18+28|0,H*0.70|0,8,18);
+    // 地図・書き物
+    ctx.fillStyle='#D8C88A'; ctx.fillRect(W*0.40|0,H*0.30|0,30,22);
+    ctx.fillStyle='rgba(60,40,10,0.3)'; ctx.fillRect(W*0.41|0,H*0.31|0,28,20);
+    ctx.fillStyle='rgba(60,40,10,0.5)'; ctx.fillRect(W*0.43|0,H*0.33|0,8,2); ctx.fillRect(W*0.43|0,H*0.37|0,12,2);
+    dAndon(W*0.50|0,H*0.12|0); dAndon(W*0.13|0,H*0.12|0); dAndon(W*0.84|0,H*0.80|0);
+  }
+}
+function dFuton(cx,cy,col){ctx.fillStyle=col;ctx.fillRect(cx-40,cy-65,80,130);ctx.fillStyle='rgba(0,0,0,0.08)';for(var f=-50;f<65;f+=22) ctx.fillRect(cx-38,cy+f,76,1);}
+function dPillow(cx,cy){ctx.fillStyle='#EAD8B4';ctx.fillRect(cx-22,cy-11,44,22);}
+function dTable(cx,cy){ctx.fillStyle='#46280A';ctx.fillRect(cx-65,cy-40,130,80);ctx.fillStyle='rgba(255,210,80,0.08)';ctx.fillRect(cx-65,cy-40,130,3);}
+function dDesk(cx,cy){ctx.fillStyle='#3E2208';ctx.fillRect(cx-50,cy-33,100,66);ctx.fillStyle='rgba(255,210,80,0.08)';ctx.fillRect(cx-50,cy-33,100,3);}
+function dZabuton(cx,cy){ctx.fillStyle='#5A4028';ctx.fillRect(cx-20,cy-18,40,36);ctx.fillStyle='#6E5034';ctx.fillRect(cx-15,cy-13,30,26);}
+function dAndon(cx,cy){ctx.fillStyle='rgba(248,210,80,0.22)';ctx.fillRect(cx-32,cy-32,64,64);ctx.fillStyle='rgba(255,220,100,0.09)';ctx.fillRect(cx-52,cy-52,104,104);ctx.fillStyle=P.AN;ctx.fillRect(cx-7,cy-8,14,16);ctx.fillStyle='#FFFCD8';ctx.fillRect(cx-5,cy-6,10,12);}
+
+// ===========================
+// HUD（覗きモード）
+// ===========================
+function drawPeepHUD(def,room){
+  var ratio=peepTimer/peepTimerMax;
+  var bx=14,by=H-30,bw=W-28,bh=8;
+  // タイマーバーの枠（SNES風二重枠）
+  ctx.fillStyle='#080410';ctx.fillRect(bx-2,by-2,bw+4,bh+4);
+  ctx.fillStyle='#403870';ctx.fillRect(bx-1,by-1,bw+2,bh+2);
+  var tc=ratio>0.5?'#28C828':(ratio>0.25?'#E8CC00':'#D82020');
+  if(ratio<0.25&&Math.floor(frame/6)%2===0) tc='#FF6060';
+  ctx.fillStyle=tc;ctx.fillRect(bx,by,bw*ratio|0,bh);
+  // TIME文字
+  drawTextShadow('TIME',bx,by-5,P.WH,9,'left');
+
+  // クールダウン表示（小さく右上）
+  if(throwCD>0){
+    var cr2=throwCD/throwCDMax;
+    ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(W-28,8,18,18);
+    ctx.fillStyle='#D0B040';ctx.fillRect(W-28,8+18*(1-cr2)|0,18,18*cr2|0);
+  }
+
+  // 部屋名・スコア
+  drawTextShadow(def.name,14,18,P.AC3,11,'left');
+  drawTextShadow('KILL '+killCount()+'/'+totalPeople,W-14,18,P.YL,10,'right');
+
+  // ===== 上を見ている！（メイン訴求・画面中央大表示） =====
+  var hasLooking=false;
+  for(var i=0;i<room.people.length;i++) if(!room.people[i].dead&&room.people[i].isLookingUp){hasLooking=true;break;}
+  if(hasLooking){
+    // 背景パネル（SNES風）
+    var fl2=Math.floor(frame/5)%2;
+    ctx.fillStyle='rgba(0,0,0,0.78)';ctx.fillRect(W/2-110,H/2-48,220,48);
+    ctx.fillStyle=fl2?'#FF2020':'#FF8020';
+    ctx.fillRect(W/2-112,H/2-50,224,50);
+    ctx.fillStyle='rgba(0,0,0,0.78)';ctx.fillRect(W/2-110,H/2-48,220,46);
+    // テキスト（大・点滅）
+    if(fl2){
+      ctx.fillStyle='rgba(0,0,0,0.9)';
+      ctx.font='bold 22px monospace';ctx.textAlign='center';
+      ctx.fillText('！上を見ている！',W/2+2,H/2-18+2);
+      ctx.fillStyle='#FF3020';
+      ctx.fillText('！上を見ている！',W/2,H/2-18);
+      ctx.fillStyle='rgba(0,0,0,0.9)';ctx.font='11px monospace';
+      ctx.fillText('今は投げるな！',W/2+1,H/2-3+1);
+      ctx.fillStyle='#FFCC00';ctx.fillText('今は投げるな！',W/2,H/2-3);
+    }
+  }
+
+  // 発見カウントダウン
+  if(noticeCountdown>0){
+    var nc=Math.ceil(noticeCountdown/60);
+    var fl3=Math.floor(frame/4)%2;
+    ctx.fillStyle='rgba(0,0,0,0.72)';ctx.fillRect(W/2-80,H/2+15,160,30);
+    ctx.fillStyle=fl3?'#FF3030':'#FF7030';ctx.font='bold 16px monospace';ctx.textAlign='center';
+    ctx.fillText('発見まで... '+nc,W/2,H/2+36);
+  }
+}
+
+
+// ===========================
+// NPC（固定px・ちゃんとした顔）
+// ===========================
+function drawPersonDot(p){
+  var sx=p.x|0, sy=p.y|0;
+  var skin=p.skin, shirt=p.shirt, hair=p.hair;
+
+  // 吹き出し（先に）
+  if(!p.dead){
+    if(p.isLookingUp){
+      var fl4=Math.floor(frame/3)%2;
+      ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(sx+4,sy-44,18,24);
+      ctx.fillStyle=fl4?'#FF7010':'#FFCC20';
+      ctx.font='bold 20px monospace'; ctx.textAlign='center';
+      ctx.fillText('！',sx+13,sy-24);
+    }
+    if(p.surpriseTimer>0){
+      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(sx+4,sy-40,14,20);
+      ctx.fillStyle='#FFEE30';
+      ctx.font='bold 16px monospace'; ctx.textAlign='center';
+      ctx.fillText('!',sx+11,sy-24);
+    }
+    if(p.state==='alert'||p.state==='panic'){
+      var fl5=Math.floor(frame/3)%2;
+      ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(sx-4,sy-44,28,24);
+      ctx.fillStyle=fl5?'#FF2020':'#FF9090';
+      ctx.font='bold 16px monospace'; ctx.textAlign='center';
+      ctx.fillText('！！',sx+10,sy-26);
+    }
+  }
+
+  // 死亡
+  if(p.dead){
+    if(p.deadTimer<=0) return;
+    ctx.save();
+    ctx.globalAlpha=Math.min(1,p.deadTimer/40);
+    ctx.translate(sx,sy); ctx.rotate(p.angle+Math.PI/2);
+    ctx.fillStyle=shirt; ctx.fillRect(-10,-3,20,9);
+    ctx.fillStyle=skin;  ctx.fillRect(-7,-13,14,12);
+    ctx.fillStyle=hair;  ctx.fillRect(-7,-13,14,4);
+    ctx.fillStyle='#181818';
+    ctx.fillRect(-5,-9,3,3); ctx.fillRect(-2,-6,3,3);
+    ctx.fillRect(2,-9,3,3);  ctx.fillRect(2,-6,3,3);
+    ctx.fillRect(-5,-6,3,3); ctx.fillRect(-2,-9,3,3);
+    ctx.restore(); return;
+  }
+
+  // 寝てる
+  if(p.activity==='sleep'){
+    ctx.save(); ctx.translate(sx,sy); ctx.rotate(p.angle);
+    ctx.fillStyle='#7A5A30'; ctx.fillRect(-13,-5,26,13);
+    ctx.fillStyle=shirt;     ctx.fillRect(-9, 0,18, 8);
+    ctx.fillStyle=skin;      ctx.fillRect(-8,-14,16,13);
+    ctx.fillStyle=hair;      ctx.fillRect(-8,-14,16, 5);
+    ctx.fillStyle='rgba(0,0,0,0.65)';
+    ctx.fillRect(-5,-8,5,2); ctx.fillRect(1,-8,5,2);
+    ctx.restore(); return;
+  }
+
+  var ang=p.angle;
+  var wf=Math.floor(p.walkFrame/8)%2;
+  var mv=p.moving&&(p.activity==='walk'||p.activity==='patrol');
+  // 子供は小さく（0.7倍）
+  var SC = p.isChild ? 0.72 : 1.0;
+  var HH = Math.round(20*SC); // 頭高さ
+  var BH = Math.round(16*SC); // 胴高さ
+
+  // 職業名（小さく頭上）
+  ctx.textAlign='center'; ctx.font='9px monospace';
+  ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillText(p.job,sx+1,sy-28*SC-8+1);
+  ctx.fillStyle='rgba(255,240,200,0.85)'; ctx.fillText(p.job,sx,sy-28*SC-8);
+
+  // 影
+  ctx.fillStyle='rgba(0,0,0,0.20)';
+  ctx.fillRect(sx-Math.round(10*SC),sy+Math.round(14*SC),Math.round(20*SC),4);
+
+  // 足
+  var ll=mv&&wf  ? 4:0;
+  var rl=mv&&!wf ? 4:0;
+  var fw=Math.round(8*SC), fh=Math.round(10*SC);
+  ctx.fillStyle='#807060'; ctx.fillRect(sx-Math.round(9*SC),sy+Math.round(6*SC)+ll,fw,fh);
+  ctx.fillStyle='#807060'; ctx.fillRect(sx+Math.round(1*SC),sy+Math.round(6*SC)+rl,fw,fh);
+  ctx.fillStyle=p.shirt; ctx.fillRect(sx-Math.round(9*SC),sy+Math.round(6*SC)+ll,fw,Math.round(4*SC));
+  ctx.fillStyle=p.shirt; ctx.fillRect(sx+Math.round(1*SC),sy+Math.round(6*SC)+rl,fw,Math.round(4*SC));
+
+  // 胴体
+  var bw=Math.round(18*SC);
+  ctx.fillStyle=p.shirt; ctx.fillRect(sx-Math.round(9*SC),sy-Math.round(8*SC),bw,BH);
+  ctx.fillStyle=p.skin;  ctx.fillRect(sx-Math.round(3*SC),sy-Math.round(9*SC),Math.round(6*SC),Math.round(4*SC));
+  // 女性：帯（ピンク系アクセント）
+  if(p.isFemale){
+    ctx.fillStyle='#E06080';
+    ctx.fillRect(sx-Math.round(9*SC),sy-Math.round(1*SC),bw,Math.round(3*SC));
+  }
+  // 老人：杖
+  if(p.isOld&&!mv){
+    ctx.fillStyle='#8A6030';
+    ctx.fillRect(sx+Math.round(10*SC),sy-Math.round(6*SC),Math.round(3*SC),Math.round(22*SC));
+    ctx.fillRect(sx+Math.round(8*SC),sy-Math.round(7*SC),Math.round(7*SC),Math.round(3*SC));
+  }
+
+  // 腕
+  var la=mv&&wf  ? 4:0;
+  var ra=mv&&!wf ? 4:0;
+  var aw=Math.round(8*SC), ah=Math.round(12*SC);
+  ctx.fillStyle=p.shirt; ctx.fillRect(sx-Math.round(17*SC),sy-Math.round(6*SC)+la,aw,ah);
+  ctx.fillStyle=p.shirt; ctx.fillRect(sx+Math.round(9*SC),sy-Math.round(6*SC)+ra,aw,ah);
+  ctx.fillStyle=p.skin; ctx.fillRect(sx-Math.round(16*SC),sy+Math.round(5*SC)+la,Math.round(6*SC),Math.round(6*SC));
+  ctx.fillStyle=p.skin; ctx.fillRect(sx+Math.round(10*SC),sy+Math.round(5*SC)+ra,Math.round(6*SC),Math.round(6*SC));
+
+  // 頭
+  var hw=Math.round(18*SC);
+  ctx.fillStyle=p.skin; ctx.fillRect(sx-Math.round(9*SC),sy-Math.round(26*SC),hw,HH);
+  ctx.fillStyle=p.hair; ctx.fillRect(sx-Math.round(9*SC),sy-Math.round(26*SC),hw,Math.round(6*SC));
+  if(p.longHair){
+    ctx.fillStyle=p.hair;
+    ctx.fillRect(sx-Math.round(9*SC),sy-Math.round(21*SC),Math.round(4*SC),Math.round(16*SC));
+    ctx.fillRect(sx+Math.round(5*SC),sy-Math.round(21*SC),Math.round(4*SC),Math.round(16*SC));
+  }
+  // 老人：白髪ぼさぼさ
+  if(p.isOld){
+    ctx.fillStyle='rgba(200,200,190,0.6)';
+    ctx.fillRect(sx-Math.round(8*SC),sy-Math.round(25*SC),Math.round(3*SC),Math.round(8*SC));
+    ctx.fillRect(sx+Math.round(5*SC),sy-Math.round(25*SC),Math.round(3*SC),Math.round(8*SC));
+  }
+
+  // 顔
+  var ex=Math.round(Math.cos(ang-Math.PI/2)*1.5)|0;
+  var ey=Math.round(Math.sin(ang-Math.PI/2)*1.5)|0;
+
+  // 目（小さい点2つ・自然なサイズ）
+  if(p.isLookingUp){
+    ctx.fillStyle=P.HA;
+    ctx.fillRect(sx-Math.round(5*SC),sy-Math.round(21*SC),2,2);
+    ctx.fillRect(sx+Math.round(3*SC),sy-Math.round(21*SC),2,2);
+  } else if(p.state==='alert'||p.state==='panic'){
+    ctx.fillStyle=P.HA;
+    ctx.fillRect(sx-Math.round(5*SC)+ex,sy-Math.round(20*SC)+ey,2,3);
+    ctx.fillRect(sx+Math.round(3*SC)+ex,sy-Math.round(20*SC)+ey,2,3);
+  } else {
+    ctx.fillStyle=P.HA;
+    ctx.fillRect(sx-Math.round(5*SC)+ex,sy-Math.round(20*SC)+ey,2,2);
+    ctx.fillRect(sx+Math.round(3*SC)+ex,sy-Math.round(20*SC)+ey,2,2);
+    // 口
+    ctx.fillStyle='rgba(0,0,0,0.35)';
+    if(p.mouthShape===0) ctx.fillRect(sx-3+ex,sy-Math.round(12*SC)+ey,6,2);
+    else ctx.fillRect(sx-2+ex,sy-Math.round(12*SC)+ey,4,2);
+  }
+  // 鼻
+  ctx.fillStyle='rgba(0,0,0,0.20)';
+  ctx.fillRect(sx-1+ex,sy-Math.round(14*SC)+ey,2,3);
+
+  // 道具（手元・胴体の前に持つ）
+  if(p.activity==='eat'){
+    ctx.fillStyle='#5A3C10'; ctx.fillRect(sx-6,sy-4,12,8);
+    ctx.fillStyle='rgba(200,160,50,0.7)'; ctx.fillRect(sx-4,sy-2,8,5);
+  } else if(p.activity==='read'){
+    ctx.fillStyle='#EAD090'; ctx.fillRect(sx-13,sy-5,26,14);
+    ctx.fillStyle='rgba(0,0,0,0.12)'; ctx.fillRect(sx,sy-5,1,14);
+    ctx.fillStyle='rgba(80,50,10,0.3)'; ctx.fillRect(sx-12,sy-4,24,2);
+  }
+}
+
+
+// ===========================
+// 特殊画面（SNES風）
+// ===========================
+function drawNoticed(){
+  var a=Math.min(1,noticedTimer/12);
+  ctx.fillStyle='rgba(180,0,0,'+a*0.68+')';ctx.fillRect(0,0,W,H);
+  if(noticedTimer>16){
+    ctx.fillStyle='rgba(0,0,0,0.72)';ctx.fillRect(0,0,W,H);
+    // SNES風パネル
+    ctx.fillStyle='#800000';ctx.fillRect(W/2-120,H/2-45,240,58);
+    ctx.fillStyle='#C00020';ctx.fillRect(W/2-118,H/2-43,236,54);
+    ctx.fillStyle='rgba(0,0,0,0.88)';ctx.fillRect(W/2-116,H/2-41,232,50);
+    ctx.textAlign='center';
+    ctx.fillStyle='#EE2020';ctx.font='bold 22px monospace';ctx.fillText('気づかれた──',W/2,H/2-18);
+    ctx.fillStyle='#AA8800';ctx.font='11px monospace';ctx.fillText('任務失敗...',W/2,H/2+3);
+  }
+}
+
+function drawGameOver(){
+  ctx.fillStyle=P.BG;ctx.fillRect(0,0,W,H);
+  // SNES風ウィンドウ枠
+  ctx.fillStyle='#601010';ctx.fillRect(W/2-140,H/2-100,280,180);
+  ctx.fillStyle='#A01818';ctx.fillRect(W/2-138,H/2-98,276,176);
+  ctx.fillStyle='rgba(8,4,16,0.95)';ctx.fillRect(W/2-136,H/2-96,272,172);
+  // 内側ライン（SNES窓）
+  ctx.strokeStyle='#601010';ctx.lineWidth=2;ctx.strokeRect(W/2-130,H/2-90,260,160);
+  ctx.textAlign='center';
+  ctx.fillStyle='#FF4040';ctx.font='bold 22px monospace';ctx.fillText('任務失敗',W/2,H/2-58);
+  ctx.fillStyle='#AA8040';ctx.font='13px serif';ctx.fillText('屋根裏より見つかった',W/2,H/2-24);
+  ctx.fillStyle='#8090A8';ctx.font='10px monospace';ctx.fillText('KILL: '+killCount()+' / '+totalPeople,W/2,H/2+14);
+  ctx.fillStyle='#6070A0';ctx.fillText('─ tap to retry ─',W/2,H/2+50);
+}
+
+function drawClearScreen(){
+  ctx.fillStyle=P.BG;ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#104010';ctx.fillRect(W/2-140,H/2-110,280,190);
+  ctx.fillStyle='#1A6820';ctx.fillRect(W/2-138,H/2-108,276,186);
+  ctx.fillStyle='rgba(8,4,16,0.95)';ctx.fillRect(W/2-136,H/2-106,272,182);
+  ctx.strokeStyle='#104010';ctx.lineWidth=2;ctx.strokeRect(W/2-130,H/2-100,260,170);
+  ctx.textAlign='center';
+  ctx.fillStyle='#60FF60';ctx.font='bold 22px monospace';ctx.fillText('任務完了',W/2,H/2-68);
+  ctx.fillStyle='#C0A848';ctx.font='13px serif';ctx.fillText('宿の者は皆、果てた',W/2,H/2-30);
+  ctx.fillStyle='#8090A8';ctx.font='10px monospace';ctx.fillText('KILL: '+killCount()+' / '+totalPeople,W/2,H/2+10);
+  ctx.fillStyle='#6070A0';ctx.fillText('─ tap to restart ─',W/2,H/2+50);
+}
+
+function drawStart(){
+  drawAttic();
+  ctx.fillStyle='rgba(10,8,20,0.86)';ctx.fillRect(0,0,W,H);
+  // タイトルウィンドウ（SNES風）
+  ctx.fillStyle='#2830A0';ctx.fillRect(W/2-148,H/2-155,296,320);
+  ctx.fillStyle='#5868E8';ctx.fillRect(W/2-146,H/2-153,292,316);
+  ctx.fillStyle='rgba(10,8,22,0.96)';ctx.fillRect(W/2-144,H/2-151,288,312);
+  ctx.strokeStyle='#2830A0';ctx.lineWidth=2;ctx.strokeRect(W/2-138,H/2-145,276,300);
+  ctx.textAlign='center';
+  // タイトル
+  ctx.fillStyle='#FFEE40';ctx.font='bold 22px monospace';ctx.fillText('屋根裏の散歩者',W/2,H/2-112);
+  ctx.fillStyle='rgba(130,180,255,0.7)';ctx.font='10px monospace';ctx.fillText('YANEURA SANPOSHA',W/2,H/2-92);
+  // 操作説明
+  ctx.fillStyle='#80C0FF';ctx.font='11px monospace';
+  ctx.fillText('[ 屋根裏 ]',W/2,H/2-64);
+  ctx.fillStyle='#D8D8D8';ctx.font='10px monospace';
+  ctx.fillText('スワイプ → 移動',W/2,H/2-46);
+  ctx.fillText('穴に近づきTAP → 覗く',W/2,H/2-28);
+  ctx.fillStyle='#80C0FF';ctx.font='11px monospace';
+  ctx.fillText('[ 覗きモード ]',W/2,H/2-4);
+  ctx.fillStyle='#D8D8D8';ctx.font='10px monospace';
+  ctx.fillText('スワイプ → 手裏剣を投げる',W/2,H/2+14);
+  ctx.fillStyle='#FF8060';
+  ctx.fillText('！中はスワイプするな → 回避される',W/2,H/2+32);
+  // 人数
+  ctx.fillStyle='#A8A8C8';ctx.font='10px monospace';
+  ctx.fillText('宿の者 '+totalPeople+' 人を始末せよ',W/2,H/2+62);
+  // 点滅START
+  if(Math.floor(frame/20)%2===0){
+    ctx.fillStyle='#FFEE40';ctx.font='bold 13px monospace';
+    ctx.fillText('── TAP TO START ──',W/2,H/2+104);
+  }
+}
+
+// ===========================
+// 手裏剣投げ（スワイプ角度指定）
+// ===========================
+var shurikenLeft=0; // 残り投げ数
+
+function throwShurikenAngle(ang){
+  if(throwCD>0) return;
+  throwCD=throwCDMax; se('throw');
+  var ox=W/2,oy=28;
+  shurikens.push({x:ox,y:oy,vx:Math.cos(ang)*14,vy:Math.sin(ang)*14,rot:ang,life:85});
+}
+
+// ===========================
+// 反応（死亡時）
+// ===========================
+function onNPCDie(deadP,room){
+  for(var i=0;i<room.people.length;i++){
+    var ot=room.people[i];
+    if(ot===deadP||ot.dead) continue;
+    var dx=ot.x-deadP.x,dy=ot.y-deadP.y;
+    if(Math.sqrt(dx*dx+dy*dy)<130){
+      ot.surpriseTimer=50;
+      if(ot.state==='normal'){
+        ot.state='alert';ot.alertTarget={x:deadP.x,y:deadP.y};
+        var ang2=Math.atan2(deadP.y-ot.y,deadP.x-ot.x);
+        ot.vx=Math.cos(ang2)*0.7;ot.vy=Math.sin(ang2)*0.7;
+        ot.moving=true;ot.alertTimer=160;ot.investigateTimer=100;
+      }
+    }
+  }
+}
+
+// ===========================
+// 更新
+// ===========================
+function update(){
+  frame++;
+  tickBGM(); // 軽量：毎フレームlookaheadチェック
+
+  for(var di=0;di<DUST.length;di++){
+    var dp=DUST[di];dp.x+=dp.vx;dp.y+=dp.vy;dp.life--;
+    if(dp.life<=0){dp.x=Math.random()*MAP_W;dp.y=Math.random()*MAP_H;dp.vx=(Math.random()-0.5)*0.12;dp.vy=-Math.random()*0.08-0.015;dp.life=300+Math.random()*300;}
+  }
+
+  if(mode==='start') return;
+
+  if(mode==='attic'){
+    var bumped=false;
+    // X・Y軸を個別に判定して正確な方向を出す
+    player.x+=player.vx;
+    if(player.x<10){
+      wallBumpDir.x=-1; wallBumpDir.y=0;
+      player.x=10; player.vx=0;
+      if(wallBumpTimer===0) se('bump');
+      wallBumpTimer=14; bumped=true;
+    } else if(player.x>MAP_W-10){
+      wallBumpDir.x=1; wallBumpDir.y=0;
+      player.x=MAP_W-10; player.vx=0;
+      if(wallBumpTimer===0) se('bump');
+      wallBumpTimer=14; bumped=true;
+    }
+    player.y+=player.vy;
+    if(player.y<12){
+      wallBumpDir.x=0; wallBumpDir.y=-1;
+      player.y=12; player.vy=0;
+      if(wallBumpTimer===0) se('bump');
+      wallBumpTimer=14; bumped=true;
+    } else if(player.y>MAP_H-12){
+      wallBumpDir.x=0; wallBumpDir.y=1;
+      player.y=MAP_H-12; player.vy=0;
+      if(wallBumpTimer===0) se('bump');
+      wallBumpTimer=14; bumped=true;
+    }
+    if(!bumped&&wallBumpTimer>0) wallBumpTimer--;
+    if(Math.abs(player.vx)>0.12||Math.abs(player.vy)>0.12){
+      player.walkFrame++;
+      var spd=Math.sqrt(player.vx*player.vx+player.vy*player.vy);
+      if(spd>0.2) player.angle=Math.atan2(player.vy,player.vx)+Math.PI/2;
+    }
+    player.vx*=0.82;player.vy*=0.82;
+    // カメラをなめらかに追従（lerp）＋整数スナップで床がガタガタしない
+    camX+=(player.x-camX)*0.08;
+    camY+=(player.y-camY)*0.08;
+    // 整数スナップ：床タイルがサブピクセルでガタつかない
+    camX=Math.round(camX);
+    camY=Math.round(camY);
+
+  } else if(mode==='peep'){
+    var room=ROOMS[currentRoomIdx];
+    if(throwCD>0) throwCD--;
+    peepTimer--;
+    if(peepTimer<=0){se('alert');mode='noticed';noticedTimer=0;return;}
+
+    // 手裏剣
+    var newSh=[];
+    for(var shi=0;shi<shurikens.length;shi++){
+      var sh=shurikens[shi];
+      sh.x+=sh.vx;sh.y+=sh.vy;sh.rot+=0.42;sh.life--;
+      if(sh.life<=0||sh.x<0||sh.x>W||sh.y<0||sh.y>H) continue;
+      var hit2=false;
+      for(var pi2=0;pi2<room.people.length;pi2++){
+        var tp=room.people[pi2];if(tp.dead) continue;
+        var dx2=sh.x-tp.x,dy2=sh.y-tp.y;
+        if(Math.sqrt(dx2*dx2+dy2*dy2)<28){
+          if(tp.isLookingUp){
+            se('dodge');tp.state='panic';
+            tp.vx=(Math.random()-0.5)*2.5;tp.vy=(Math.random()-0.5)*2.5;
+            tp.moving=true;tp.alertTimer=200;tp.investigateTimer=150;
+            tp.alertTarget={x:tp.x+(Math.random()-0.5)*80,y:tp.y+(Math.random()-0.5)*80};
+            onNPCDie(tp,room);
+          } else {
+            se('hit');tp.dead=true;tp.deadTimer=90;
+            onNPCDie(tp,room);
+          }
+          hit2=true;break;
+        }
+      }
+      if(!hit2) newSh.push(sh);
+    }
+    shurikens=newSh;
+
+    // NPC更新
+    noticeCountdown=0;
+    for(var i=0;i<room.people.length;i++){
+      var p=room.people[i];
+      if(p.dead){p.deadTimer--;continue;}
+      if(p.surpriseTimer>0) p.surpriseTimer--;
+
+      // 上を見るタイマー
+      if(!p.isLookingUp){
+        p.lookUpTimer--;
+        if(p.lookUpTimer<=0){
+          p.isLookingUp=true;p.lookUpDur=28+Math.floor(Math.random()*26);
+          p.lookUpTimer=p.lookUpDur;
+        }
+      } else {
+        p.lookUpTimer--;
+        if(p.lookUpTimer<=0){p.isLookingUp=false;p.lookUpTimer=90+Math.floor(Math.random()*130);}
+      }
+
+      // 状態マシン
+      if(p.state==='alert'||p.state==='panic'){
+        p.alertTimer--;p.x+=p.vx;p.y+=p.vy;p.walkFrame++;
+        p.x=Math.max(25,Math.min(W-25,p.x));p.y=Math.max(85,Math.min(H-38,p.y));
+        var adx=p.alertTarget.x-p.x,ady=p.alertTarget.y-p.y;
+        var adist=Math.sqrt(adx*adx+ady*ady);
+        if(adist>15){
+          p.angle=Math.atan2(ady,adx)+Math.PI/2;
+          var spd4=(p.state==='panic')?1.2:0.75;
+          p.vx=adx/adist*spd4;p.vy=ady/adist*spd4;
+          // 死体に近づいてるか
+          for(var di3=0;di3<room.people.length;di3++){
+            var dp3=room.people[di3];if(!dp3.dead||dp3.deadTimer<=0) continue;
+            var ddx4=p.x-dp3.x,ddy4=p.y-dp3.y;
+            if(Math.sqrt(ddx4*ddx4+ddy4*ddy4)<30){
+              noticeCountdown=Math.max(noticeCountdown,p.investigateTimer);
+              p.investigateTimer--;
+              if(p.investigateTimer<=0){se('alert');mode='noticed';noticedTimer=0;return;}
+            }
+          }
+        } else {
+          p.vx*=0.5;p.vy*=0.5;
+          p.investigateTimer--;
+          noticeCountdown=Math.max(noticeCountdown,p.investigateTimer);
+          if(p.investigateTimer<=0){se('alert');mode='noticed';noticedTimer=0;return;}
+        }
+        if(p.alertTimer<=0) p.state='normal';
+        continue;
+      }
+
+      // 通常
+      if(p.activity==='sleep') continue;
+      if(p.activity==='eat'||p.activity==='read'||p.activity==='sit'){if(p.surpriseTimer>0)p.angle=-Math.PI/2+(Math.random()-0.5)*0.5;continue;}
+      if(p.activity==='stand'){if(Math.random()<0.003)p.angle+=(Math.random()-0.5)*0.5;continue;}
+      if(!p.moving){
+        p.restTimer--;
+        if(p.restTimer<=0){
+          p.moving=true;
+          if(p.activity==='patrol'){
+            p.patrolStep=(p.patrolStep+1)%4;
+            var pts=[[W*0.22,H*0.32],[W*0.72,H*0.32],[W*0.72,H*0.72],[W*0.22,H*0.72]];
+            p.tx=pts[p.patrolStep][0];p.ty=pts[p.patrolStep][1];
+          } else {p.tx=60+Math.random()*(W-120);p.ty=85+Math.random()*(H-165);}
+          var ang5=Math.atan2(p.ty-p.y,p.tx-p.x);
+          var spd5=(p.activity==='patrol')?0.85:0.3+Math.random()*0.36;
+          p.vx=Math.cos(ang5)*spd5;p.vy=Math.sin(ang5)*spd5;
+        }
+        continue;
+      }
+      p.walkFrame++;p.x+=p.vx;p.y+=p.vy;
+      p.x=Math.max(25,Math.min(W-25,p.x));p.y=Math.max(85,Math.min(H-38,p.y));
+      var ddx5=p.x-p.tx,ddy5=p.y-p.ty;
+      if(Math.sqrt(ddx5*ddx5+ddy5*ddy5)<12){p.vx=0;p.vy=0;p.moving=false;p.restTimer=(p.activity==='patrol')?15:80+Math.random()*150;}
+      p.angle=Math.atan2(p.vy,p.vx)+Math.PI/2;
+    }
+
+    // 死体整理
+    var newPpl=[];for(var j=0;j<room.people.length;j++) if(!room.people[j].dead||room.people[j].deadTimer>0) newPpl.push(room.people[j]);
+    room.people=newPpl;
+
+    // 全滅
+    var livNow=0;for(var lni=0;lni<room.people.length;lni++) if(!room.people[lni].dead) livNow++;
+    if(livNow===0){
+      if(autoRetTimer===0) autoRetTimer=1;autoRetTimer++;
+      if(autoRetTimer>65){
+        room.cleared=true;var allClear=true;
+        for(var ci=0;ci<ROOMS.length;ci++) if(!ROOMS[ci].cleared){allClear=false;break;}
+        if(allClear){mode='clear';if(!clearSoundPlayed){se('clear');clearSoundPlayed=true;}}
+        else{mode='attic';currentRoomIdx=null;shurikens=[];autoRetTimer=0;throwCD=0;noticeCountdown=0;}
+      }
+    }
+  } else if(mode==='noticed'){
+    noticedTimer++;if(noticedTimer>80) mode='gameover';
+  }
+}
+
+// ===========================
+// メインループ
+// ===========================
+function loop(){
+  update();
+  if(mode==='start') drawStart();
+  else if(mode==='attic') drawAttic();
+  else if(mode==='peep') drawPeepRoom();
+  else if(mode==='noticed'){drawPeepRoom();drawNoticed();}
+  else if(mode==='gameover') drawGameOver();
+  else if(mode==='clear') drawClearScreen();
+  requestAnimationFrame(loop);
+}
+
+function resetGame(){
+  for(var i=0;i<ROOMS.length;i++){
+    ROOMS[i].cleared=false;ROOMS[i].people=[];
+    var cnt=(ROOMS[i].def.type==='guard')?2+Math.floor(Math.random()*2):2+Math.floor(Math.random()*3);
+    for(var j=0;j<cnt;j++) ROOMS[i].people.push(makePerson(ROOMS[i].def.type,j));
+  }
+  shurikens=[];mode='attic';currentRoomIdx=null;autoRetTimer=0;peepTimer=0;
+  noticedTimer=0;clearSoundPlayed=false;throwCD=0;noticeCountdown=0;wallBumpTimer=0;shurikenLeft=0;
+  player.x=MAP_W/2;player.y=MAP_H/2;player.vx=0;player.vy=0;camX=MAP_W/2;camY=MAP_H/2;
+  totalPeople=0;for(var i=0;i<ROOMS.length;i++) totalPeople+=ROOMS[i].people.length;
+}
+
+function enterRoom(h){
+  mode='peep';currentRoomIdx=h.id;shurikens=[];autoRetTimer=0;throwCD=0;noticeCountdown=0;
+  peepTimer=ROOMS[h.id].def.timeMax;peepTimerMax=ROOMS[h.id].def.timeMax;
+  shurikenLeft=ROOMS[h.id].def.shuMax;
+  cameraHintTimer=(cameraHintTimer===0)?90:0;
+  if(AC) tickTime=AC.currentTime+0.1; // 時計の針タイミングリセット
+}
+
+// ===========================
+// 入力
+// ===========================
+var touchSX=0,touchSY=0,touchT=0,touchMoved=false;
+// peepスワイプ用
+var peepSwipeSX=0,peepSwipeSY=0,peepSwipeMoved=false;
+var SWIPE_MIN=28;
+
+function handleTap(){
+  if(mode==='start'){initAudio();mode='attic';camX=player.x;camY=player.y;cameraHintTimer=0;return;}
+  if(mode==='gameover'||mode==='clear'){resetGame();return;}
+  if(mode==='attic'){var nh=nearHole();if(nh) enterRoom(nh);}
+}
+
+// --- タッチ ---
+canvas.addEventListener('touchstart',function(e){
+  e.preventDefault();
+  var t=e.touches[0];
+  touchSX=t.clientX;touchSY=t.clientY;touchT=Date.now();touchMoved=false;
+  if(mode==='peep'){peepSwipeSX=t.clientX;peepSwipeSY=t.clientY;peepSwipeMoved=false;}
+},{passive:false});
+
+canvas.addEventListener('touchmove',function(e){
+  e.preventDefault();
+  var t=e.touches[0];
+  if(mode==='attic'){
+    touchMoved=true;
+    var dx=t.clientX-touchSX,dy=t.clientY-touchSY;
+    var dist=Math.sqrt(dx*dx+dy*dy);
+    if(dist>8){player.vx=(dx/dist)*3.4;player.vy=(dy/dist)*3.4;}
+  } else if(mode==='peep'){
+    var ddx=t.clientX-peepSwipeSX,ddy=t.clientY-peepSwipeSY;
+    if(Math.sqrt(ddx*ddx+ddy*ddy)>6) peepSwipeMoved=true;
+  }
+},{passive:false});
+
+canvas.addEventListener('touchend',function(e){
+  e.preventDefault();
+  var t2=e.changedTouches[0];
+  if(mode==='peep'){
+    var ddx=t2.clientX-peepSwipeSX,ddy=t2.clientY-peepSwipeSY;
+    var dist=Math.sqrt(ddx*ddx+ddy*ddy);
+    if(peepSwipeMoved&&dist>=SWIPE_MIN){
+      // スワイプ方向に投げる（穴の中心から）
+      var ang=Math.atan2(ddy,ddx);
+      throwShurikenAngle(ang);
+    }
+    // スワイプなし（≒タップ）は無効（スライドのみ）
+    return;
+  }
+  if(Date.now()-touchT<300&&!touchMoved) handleTap();
+},{passive:false});
+
+// --- マウス（PC） ---
+var mdown=false,lmx=0,lmy=0,mdx=0,mdy=0;
+canvas.addEventListener('mousedown',function(e){
+  mdown=true;lmx=e.clientX;lmy=e.clientY;mdx=0;mdy=0;touchMoved=false;touchT=Date.now();
+  if(mode==='peep'){peepSwipeSX=e.clientX;peepSwipeSY=e.clientY;peepSwipeMoved=false;}
+});
+canvas.addEventListener('mousemove',function(e){
+  if(!mdown) return;
+  if(mode==='attic'){
+    touchMoved=true;player.vx=(e.clientX-lmx)*0.5;player.vy=(e.clientY-lmy)*0.5;lmx=e.clientX;lmy=e.clientY;
+  } else if(mode==='peep'){
+    mdx=e.clientX-peepSwipeSX;mdy=e.clientY-peepSwipeSY;
+    if(Math.sqrt(mdx*mdx+mdy*mdy)>6) peepSwipeMoved=true;
+  }
+});
+canvas.addEventListener('mouseup',function(e){
+  if(!mdown) return;mdown=false;
+  if(mode==='peep'){
+    var ddx=e.clientX-peepSwipeSX,ddy=e.clientY-peepSwipeSY;
+    var dist=Math.sqrt(ddx*ddx+ddy*ddy);
+    if(peepSwipeMoved&&dist>=SWIPE_MIN) throwShurikenAngle(Math.atan2(ddy,ddx));
+    return;
+  }
+  if(!touchMoved) handleTap();
+});
+
+loop();
+</script>
+</body>
+</html>
