@@ -1520,15 +1520,25 @@ canvas.addEventListener('touchmove',function(e){
 },{passive:false});
 canvas.addEventListener('touchend',function(e){
   e.preventDefault();
-  var t2=e.changedTouches[0];
-  if(mode==='peep'){
-    var ddx=t2.clientX-peepSwipeSX,ddy=t2.clientY-peepSwipeSY;
-    var dist=Math.sqrt(ddx*ddx+ddy*ddy);
-    if(peepSwipeMoved&&dist>=SWIPE_MIN){
-      // スワイプ方向に投げる（穴の中心から）
-      var ang=Math.atan2(ddy,ddx);
-      throwShurikenAngle(ang);
-    }
+ var t2 = e.changedTouches[0];
+
+    // 画面のズレを補正する計算を追加
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / rect.width;
+    var scaleY = canvas.height / rect.height;
+    var canvasX2 = (t2.clientX - rect.left) * scaleX;
+    var canvasY2 = (t2.clientY - rect.top) * scaleY;
+
+    if(mode === 'peep'){
+        // 計算後の canvasX2, canvasY2 を使う
+        var ddx = canvasX2 - peepSwipeSX;
+        var ddy = canvasY2 - peepSwipeSY;
+        var dist = Math.sqrt(ddx*ddx + ddy*ddy);
+        if(peepSwipeMoved && dist >= SWIPE_MIN){
+            // スワイプ方向に投げる
+            var ang = Math.atan2(ddy, ddx);
+            throwShurikenAngle(ang);
+        }
     // スワイプなし（≒タップ）は無効（スライドのみ）
     return;
   }
