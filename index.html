@@ -1483,15 +1483,15 @@ canvas.addEventListener('touchstart', function(e) {
     var canvasX = (t.clientX - rect.left) * scaleX;
     var canvasY = (t.clientY - rect.top) * scaleY;
 
-    touchSX = canvasX; 
+  // 1487行目あたりから
+    touchSX = canvasX;
     touchSY = canvasY;
     touchT = Date.now();
     touchMov = false;
 
     if(mode === 'peep') {
-        // 【重要】ここを t.clientX ではなく canvasX にする！
-        peepSwipeSX = canvasX; 
-        peepSwipeSY = canvasY;
+        peepSwipeSX = canvasX;  // ここが canvasX になっているか！
+        peepSwipeSY = canvasY;  // ここが canvasY になっているか！
     }
 }, {passive: false});
 }, {passive: false});
